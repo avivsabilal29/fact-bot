@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Node.js
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Data (session files, checked comments)
+data/*.json
+data/*.txt
+!.gitkeep
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Tunnel
+*key*
