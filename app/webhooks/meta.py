@@ -127,7 +127,7 @@ async def _process_mention(
 
     # Send reply
     success = await _reply_to_comment(comment_id, reply_msg, token)
-    return success
+    return bool(success)
 
 
 @router.get("")
