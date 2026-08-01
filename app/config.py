@@ -7,6 +7,7 @@ from typing import Optional
 class Settings(BaseSettings):
     meta_app_id: str = "1322990666256367"
     meta_app_secret: str = ""
+    meta_app_secret_2: str = ""
     meta_page_id: str = ""
     meta_page_access_token: str = ""
     meta_verify_token: str = "klarifai_verify_2026"

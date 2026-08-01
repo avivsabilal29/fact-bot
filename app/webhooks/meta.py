@@ -41,6 +41,14 @@ def _verify_signature(payload: bytes, signature_header: str, app_secret: str) ->
     return hmac.compare_digest(expected, signature_header)
 
 
+def _verify_signature_multi(payload: bytes, signature_header: str, *secrets: str) -> bool:
+    """Try multiple app secrets (multi-app webhook endpoint)."""
+    for secret in secrets:
+        if secret and _verify_signature(payload, signature_header, secret):
+            return True
+    return False
+
+
 def _is_mention(text: str) -> bool:
     """Check if comment contains @mention of our bot."""
     text_lower = text.lower()
@@ -151,12 +159,16 @@ async def verify_webhook(request: Request):
 @router.post("")
 async def handle_webhook(request: Request):
     """Receive real-time webhook events from Meta."""
-    # Verify signature
+    # Verify signature — try all configured app secrets (multi-app setup)
     sig_header = request.headers.get("X-Hub-Signature-256", "")
     if sig_header:
         body = await request.body()
-        if not _verify_signature(body, sig_header, settings.meta_app_secret):
-            logger.warning("Invalid webhook signature")
+        secrets = [
+            settings.meta_app_secret,
+            getattr(settings, "meta_app_secret_2", ""),
+        ]
+        if not _verify_signature_multi(body, sig_header, *secrets):
+            logger.warning("Invalid webhook signature (tried %d secret(s))", len([s for s in secrets if s]))
             raise HTTPException(status_code=403, detail="Invalid signature")
 
     payload = await request.json()
