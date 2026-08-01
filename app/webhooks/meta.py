@@ -348,6 +348,12 @@ async def _reply_dm(recipient_id: str, text: str) -> bool:
 async def handle_message(value: dict):
     """Handle Instagram DM / Messenger messages — auto-reply intro to every DM."""
     msg_raw = value.get("message", "")
+
+    # Skip non-message events (read receipts, deliveries, seen, etc.) — no "message" key
+    if not msg_raw:
+        logger.info("⏭️ Non-message event (read/delivery/seen) — skipping")
+        return
+
     mid = None
     if isinstance(msg_raw, dict):
         mid = msg_raw.get("mid")
