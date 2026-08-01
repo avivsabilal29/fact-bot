@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.webhooks.meta import router as meta_webhook_router
-from app.pipeline.poller import poll_loop
 
 logging.basicConfig(
     level=logging.INFO,
