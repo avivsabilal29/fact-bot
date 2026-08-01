@@ -181,6 +181,7 @@ async def handle_webhook(request: Request):
     entries = payload.get("entry", [])
 
     for entry in entries:
+        # Format 1: changes[] — comments, mentions, feed (Instagram Graph webhook)
         changes = entry.get("changes", [])
         for change in changes:
             field = change.get("field", "")
@@ -202,6 +203,15 @@ async def handle_webhook(request: Request):
             except Exception as e:
                 import traceback
                 logger.error(f"Error handling {field}: {e}\n{traceback.format_exc()}")
+
+        # Format 2: messaging[] — DM (Messaging webhook)
+        messaging = entry.get("messaging", [])
+        for msg in messaging:
+            try:
+                await handle_message(msg)
+            except Exception as e:
+                import traceback
+                logger.error(f"Error handling DM: {e}\n{traceback.format_exc()}")
 
     return {"status": "received"}
 
