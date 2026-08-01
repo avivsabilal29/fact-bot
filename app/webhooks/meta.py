@@ -310,8 +310,33 @@ async def handle_feed_event(value: dict):
         # TODO: Implement Facebook reply
 
 
+async def _reply_dm(recipient_id: str, text: str) -> bool:
+    """Send a DM reply via Instagram Messaging API (POST /{ig-id}/messages)."""
+    ig_id = settings.ig_business_id
+    token = settings.ig_user_token or settings.ig_basic_token
+    if not ig_id or not token:
+        logger.warning("No ig_business_id or IG token configured for DM reply")
+        return False
+    url = f"https://graph.instagram.com/v26.0/{ig_id}/messages"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text},
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, params={"access_token": token}, json=payload)
+        if resp.is_error:
+            logger.error(f"DM reply failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+        logger.info(f"✅ DM reply sent to {recipient_id}")
+        return True
+    except Exception as e:
+        logger.error(f"DM reply exception: {e}")
+        return False
+
+
 async def handle_message(value: dict):
-    """Handle Instagram DM / Messenger messages — scrape the DM content via API."""
+    """Handle Instagram DM / Messenger messages — auto-reply intro to every DM."""
     msg_raw = value.get("message", "")
     mid = None
     if isinstance(msg_raw, dict):
@@ -323,7 +348,25 @@ async def handle_message(value: dict):
     from_id = value.get("sender", {}).get("id", "unknown")
     logger.info(f"💬 DM received from {from_id} (mid={mid}): \"{msg_text[:80]}\"")
 
-    # Scrape the full DM content via API (IG user token)
+    # Skip if sender is the bot itself (echo loop prevention)
+    if from_id == settings.ig_business_id:
+        logger.info("⏭️ DM from bot itself (echo) — skipping")
+        return
+
+    # Dedup by mid so a duplicated webhook doesn't double-reply
+    if mid and _mark_processed(mid):
+        logger.info(f"⏭️ Already replied to DM {mid} — skipping")
+        return
+
+    # Auto-reply intro (English) to every incoming DM
+    intro = (
+        "Hello! 👋 I'm FactBot, KlarifAI's fact-checking assistant.\n\n"
+        "I'm here to help you analyze facts and news! 🔍\n"
+        "Currently in development phase — more features coming soon. 🚀"
+    )
+    await _reply_dm(from_id, intro)
+
+    # Scrape the full DM content via API (IG user token) for logging
     ig_token = settings.ig_user_token or settings.ig_basic_token
     if not mid or not ig_token:
         logger.info("No mid or IG token — skipping DM scrape")
