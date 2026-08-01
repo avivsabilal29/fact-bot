@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import logging
 
 import httpx
@@ -174,6 +175,7 @@ async def handle_webhook(request: Request):
             raise HTTPException(status_code=403, detail="Invalid signature")
 
     payload = await request.json()
+    logger.info(f"📦 RAW PAYLOAD: {json.dumps(payload, ensure_ascii=False)[:2000]}")
     logger.debug(f"Webhook payload keys: {list(payload.keys())}")
 
     entries = payload.get("entry", [])
@@ -183,7 +185,8 @@ async def handle_webhook(request: Request):
         for change in changes:
             field = change.get("field", "")
             value = change.get("value", {})
-            logger.info(f"Webhook event: field={field}")
+            logger.info(f"⚡ Webhook event: field={field}")
+            logger.info(f"  📄 value: {json.dumps(value, ensure_ascii=False)[:800]}")
 
             try:
                 if field == "comments":
@@ -194,6 +197,8 @@ async def handle_webhook(request: Request):
                     await handle_feed_event(value)
                 elif field == "messages":
                     await handle_message(value)
+                else:
+                    logger.info(f"  ⏭️ Field '{field}' not handled (no-op)")
             except Exception as e:
                 import traceback
                 logger.error(f"Error handling {field}: {e}\n{traceback.format_exc()}")
