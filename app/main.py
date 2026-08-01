@@ -4,8 +4,9 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.config import settings
 from app.webhooks.meta import router as meta_webhook_router
@@ -62,6 +63,17 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/auth/instagram/callback")
+async def instagram_oauth_callback(request: Request):
+    """OAuth callback target for Instagram Business Login (redirect URL)."""
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
+    logger.info(f"🔐 IG OAuth callback: code={code[:20] if code else 'none'}..., state={state}")
+    return HTMLResponse(
+        "<h2>KlarifAI</h2><p>Login berhasil! Silakan kembali ke aplikasi.</p>"
+    )
 
 
 @app.post("/test/reply")
