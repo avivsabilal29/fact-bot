@@ -167,7 +167,9 @@ async def handle_webhook(request: Request):
             settings.meta_app_secret,
             getattr(settings, "meta_app_secret_2", ""),
         ]
-        if not _verify_signature_multi(body, sig_header, *secrets):
+        if getattr(settings, "meta_skip_signature", False):
+            logger.info("⚠️ Signature check SKIPPED (META_SKIP_SIGNATURE_CHECK=true) — accepting payload")
+        elif not _verify_signature_multi(body, sig_header, *secrets):
             logger.warning("Invalid webhook signature (tried %d secret(s))", len([s for s in secrets if s]))
             raise HTTPException(status_code=403, detail="Invalid signature")
 
