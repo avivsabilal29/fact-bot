@@ -311,12 +311,57 @@ async def handle_feed_event(value: dict):
 
 
 async def handle_message(value: dict):
-    """Handle Instagram DM / Messenger messages."""
+    """Handle Instagram DM / Messenger messages — scrape the DM content via API."""
     msg_raw = value.get("message", "")
+    mid = None
     if isinstance(msg_raw, dict):
+        mid = msg_raw.get("mid")
         msg_text = msg_raw.get("text", "")
     else:
+        mid = value.get("mid")
         msg_text = str(msg_raw) if msg_raw else ""
     from_id = value.get("sender", {}).get("id", "unknown")
-    logger.info(f"💬 DM received from {from_id}: \"{msg_text[:80]}\"")
-    # TODO: Implement DM reply
+    logger.info(f"💬 DM received from {from_id} (mid={mid}): \"{msg_text[:80]}\"")
+
+    # Scrape the full DM content via API (IG user token)
+    ig_token = settings.ig_user_token or settings.ig_basic_token
+    if not mid or not ig_token:
+        logger.info("No mid or IG token — skipping DM scrape")
+        return
+
+    try:
+        url = f"https://graph.instagram.com/v26.0/{mid}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params={
+                "fields": "id,created_time,message,from,to,attachments",
+                "access_token": ig_token,
+            })
+        if resp.is_error:
+            logger.warning(f"Failed to fetch DM {mid}: {resp.text[:200]}")
+            return
+        detail = resp.json()
+
+        dm_from = (detail.get("from") or {}).get("username", from_id)
+        dm_text = detail.get("message", "") or ""
+        attachments = (detail.get("attachments") or {}).get("data", []) or []
+        logger.info(f"📄 DM detail: from=@{dm_from} | text=\"{dm_text[:200]}\" | attachments={len(attachments)}")
+
+        # Inspect attachments (template/share)
+        for att in attachments:
+            if "generic_template" in att:
+                title = att["generic_template"].get("title", "")
+                logger.info(f"🖼️ Attachment template: \"{title}\"")
+                if title and "aplikasi terbaru" in title.lower():
+                    logger.info("⏭️ System template (update app) — skipping")
+            elif "share" in att:
+                share = att.get("share", {})
+                logger.info(f"🔗 Shared content: {share.get('link') or share.get('url', '')}")
+            else:
+                logger.info(f"📎 Attachment: {json.dumps(att, ensure_ascii=False)[:300]}")
+
+        # If DM mentions the bot, treat as verification request
+        if dm_text and _is_mention(dm_text):
+            logger.info(f"🎯 DM @mention from @{dm_from}: \"{dm_text[:100]}\"")
+            # TODO: reply in DM thread via POST /{ig-id}/messages
+    except Exception as e:
+        logger.error(f"DM scrape error: {e}")

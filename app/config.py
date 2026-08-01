@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     parkee_proxy_url: str = ""
     parkee_model: str = "deepseek-v3"
     ig_basic_token: str = ""
+    ig_user_token: str = ""
 
     redis_url: str = "redis://localhost:6379"
     database_url: str = "sqlite:///./data/klarifai.db"
