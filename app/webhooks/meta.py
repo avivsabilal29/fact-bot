@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks/meta", tags=["meta"])
 
+# Dedup: recently processed comment IDs (in-memory)
+_processed_ids = set()
+_MAX_PROCESSED = 500
+
+
+def _mark_processed(comment_id: str) -> bool:
+    """Return True if already processed, False otherwise. Marks on first sight."""
+    if comment_id in _processed_ids:
+        return True
+    _processed_ids.add(comment_id)
+    if len(_processed_ids) > _MAX_PROCESSED:
+        _processed_ids.clear()
+    return False
+
 # Bot's own username
 BOT_USERNAME = "factacheckfact"
 BOT_USERNAME_ALT = "factcheckfact"
@@ -46,8 +60,8 @@ def _strip_mention(text: str) -> str:
     return text.strip().strip(" ,:;")
 
 
-async def _get_media_caption(media_id: str, token: str) -> str:
-    """Get caption/content of an Instagram post."""
+async def _get_media_caption(media_id: str, token: str) -> str | None:
+    """Get caption/content of an Instagram post. Returns None if media inaccessible."""
     url = f"https://graph.facebook.com/v25.0/{media_id}"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, params={
@@ -56,7 +70,7 @@ async def _get_media_caption(media_id: str, token: str) -> str:
         })
         if resp.is_error:
             logger.warning(f"Failed to get media {media_id}: {resp.text[:200]}")
-            return ""
+            return None
         data = resp.json()
         return data.get("caption", "") or ""
 
@@ -87,8 +101,11 @@ async def _process_mention(
     """Process a mention: read media, send reply."""
     logger.info(f"🔔 Mention from @{from_user}: \"{text[:100]}\"")
 
-    # Get post caption/content
+    # Get post caption/content — if fetch fails, skip reply (invalid media id)
     caption = await _get_media_caption(media_id, token)
+    if caption is None:
+        logger.warning(f"Skipping reply: media {media_id} not accessible")
+        return False
     claim = _strip_mention(text)
 
     # Build reply
@@ -192,6 +209,11 @@ async def handle_instagram_comment(value: dict):
         logger.info("Not a mention of this bot, skipping")
         return
 
+    # Dedup
+    if comment_id and _mark_processed(comment_id):
+        logger.info(f"Already processed comment {comment_id}, skipping")
+        return
+
     # Get the token
     token = settings.meta_page_access_token
     if not token:
@@ -205,17 +227,44 @@ async def handle_instagram_comment(value: dict):
 async def handle_mention(value: dict):
     """
     Handle @mention events from Instagram (when tagged on OTHER people's posts).
+    Robust extraction: Meta's mentions payload structure varies.
     """
-    comment_id = value.get("comment_id") or value.get("id")
-    media_id = value.get("media_id")
-    text = value.get("text", "")
-    from_id = value.get("from", {})
-    from_user = from_id.get("username", "unknown") if isinstance(from_id, dict) else "unknown"
+    import json as _json
+    # Log the FULL raw value so we can see the actual structure
+    logger.info(f"📦 Raw mention value: {_json.dumps(value, ensure_ascii=False)[:500]}")
 
-    logger.info(f"🔔 Mention from @{from_user}: \"{text[:100]}\"")
+    # Extract with multiple fallback key names
+    comment_id = (
+        value.get("comment_id")
+        or value.get("commentId")
+        or value.get("id")
+    )
+    media_id = (
+        value.get("media_id")
+        or value.get("mediaId")
+        or (value.get("media") or {}).get("id")
+        or (value.get("target") or {}).get("media_id")
+    )
+    text = (
+        value.get("text")
+        or value.get("comment_text")
+        or (value.get("comment") or {}).get("text")
+        or ""
+    )
+    from_raw = value.get("from") or value.get("user") or {}
+    from_user = (
+        from_raw.get("username") if isinstance(from_raw, dict) else str(from_raw)
+    ) or "unknown"
+
+    logger.info(f"🔔 Mention from @{from_user}: \"{text[:100]}\" (comment={comment_id}, media={media_id})")
 
     if not comment_id or not media_id:
         logger.warning(f"Incomplete mention data: comment_id={comment_id}, media_id={media_id}")
+        return
+
+    # Dedup
+    if _mark_processed(comment_id):
+        logger.info(f"Already processed mention {comment_id}, skipping")
         return
 
     token = settings.meta_page_access_token
