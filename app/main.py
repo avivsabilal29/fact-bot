@@ -24,10 +24,8 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 KlarifAI backend starting...")
     logger.info(f"📱 Meta App ID: {settings.meta_app_id}")
     logger.info(f"📱 IG Business ID: {settings.ig_business_id}")
-    
-    # Start polling loop in background
-    asyncio.create_task(poll_loop())
-    logger.info("🤖 Mention poller started (every 30s)")
+    # Webhook-based (poller disabled — real-time via Meta webhooks)
+    logger.info("🔔 Webhook mode: listening for Meta events")
     yield
     # Shutdown
     logger.info("👋 KlarifAI backend shutting down...")
