@@ -204,6 +204,7 @@ CMD ["hermes", "gateway", "run"]
 - **Model:** `deepseek-v4-flash` (provider deepseek, base `https://api.deepseek.com/v1`) — di `config.yaml` profile
 - **API key:** `DEEPSEEK_API_KEY` — dual jalur: env compose `${DEEPSEEK_API_KEY:-}` + `.env` profile (mount rw)
 - **Honcho memory: DISABLED** (`memory_enabled: false` + `user_profile_enabled: false`) — user: "kalau oake honcho agak lama soalnya". Disable di **kedua** config: copy repo (`hermes-profiles/factbot/` — yang di-mount ke container VPS) DAN profile asli laptop (biar hasil test konsisten). Bot pure: SOUL.md + config, tanpa dependency memory eksternal. Konteks per-user tetap di DB bot (jobs/pending). **Terbukti 2.7× lebih cepat: 49s → 18s.**
+- **LLM timeout = 60s** (bukan 30) — hasil benchmark DeepSeek (2 lokasi, 4 varian: stream/non-stream × t30/t90): DeepSeek normal 3-6s, sesekali spike >30s. Timeout 60s = buffer anti-spike tanpa retry; **streaming TIDAK diimplementasi** (data: stream vs non-stream hampir sama, malah kadang +0.4s). `LLM_TIMEOUT_SECONDS=60` di .env.
 
 ### Langkah 2: Service di `docker-compose.yml`
 
