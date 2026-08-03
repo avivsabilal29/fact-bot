@@ -263,8 +263,12 @@ async def handle_job(store, job, progress=None) -> None:
     media_url = payload.get("media_url") or job.get("media_url") or ""
     name = payload.get("name") or job.get("name") or sender_id or "User"
 
-    # 0. PROGRESS — kabari user bahwa analisa dimulai (best effort)
-    await _progress_send(progress, "start", PROGRESS_START_REPLY)
+    # 0. PROGRESS — kabari user analisa dimulai (best effort).
+    #    HANYA di attempt pertama (attempts==0): retry JANGAN kirim "start" lagi
+    #    (anti-duplikat "🔄 Analyzing..." — dedup ProgressNotifier per-attempt
+    #    tidak berlaku lintas retry karena instance dibuat baru di process_job).
+    if job.get("attempts", 0) < 1:
+        await _progress_send(progress, "start", PROGRESS_START_REPLY)
 
     # 1. ANALYZE — LLM verdict + markdown (lazy import)
     from app.pipeline.analyzer import run_analysis  # lazy

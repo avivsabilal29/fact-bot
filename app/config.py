@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     factbot_timeout: float = 30.0      # timeout upload report (>= 30s)
 
     # ---- Pipeline analisa (LLM OpenAI-compatible) ----
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = 60.0
 
     # ---- Pipeline video (faster-whisper / yt-dlp) ----
     whisper_model: str = "small"          # base | small
@@ -57,9 +57,13 @@ class Settings(BaseSettings):
     progress_min_interval_seconds: float = 20.0
     progress_slow_after_seconds: float = 30.0
 
+    # ---- Hermes brain (service hermes-brain di docker-compose) ----
+    hermes_webhook_secret: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"   # env tambahan (HERMES_*, dll) tidak crash Settings()
 
 
 settings = Settings()
