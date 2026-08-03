@@ -1,26 +1,120 @@
-version: "3.8"
+# =============================================================================
+# FactBot — Docker Compose (VPS 169.58.111.12)
+# -----------------------------------------------------------------------------
+# Stack teman (nginx / factbot_web / factbot_db) SUDAH JALAN sebagai project
+# sendiri. File ini hanya menambahkan service bot + bot-worker, yang BERGABUNG
+# ke network Docker milik stack teman (external). Karena itu:
+#   - TIDAK ada port publik di sini — nginx existing proxy /webhooks/ → bot:8001
+#     via Docker DNS (resolver 127.0.0.11 + variable proxy_pass). bot:8001
+#     hanya bisa diakses dari dalam network.
+#   - Nama network: ${EXTERNAL_NETWORK} (cek: docker network ls di VPS).
+#   - .env dipakai utk interpolasi compose DAN diteruskan ke container.
+# Jalankan:  docker compose up -d
+# =============================================================================
+name: factbot
+
+networks:
+  web:
+    external: true
+    name: ${EXTERNAL_NETWORK:-factbot_net}
+
+volumes:
+  factbot_data:        # data/ job sqlite, reports .md
+  whisper_cache:       # model faster-whisper (HF_HOME) — download sekali, dipakai bot & worker
+  hermes_profile:      # Hermes brain state (memories, sessions) — persist di VPS
 
 services:
-  app:
-    build: .
-    ports:
-      - "8000:8000"
+  # ------------------------------------------------------------------ API --
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: factbot/bot:${IMAGE_TAG:-latest}
+    restart: unless-stopped
     env_file: .env
+    networks:
+      - web
+    # NO host ports. Debug dari host (opsional, bind 127.0.0.1 saja):
+    # ports:
+    #   - "127.0.0.1:8001:8001"
     volumes:
-      - ./data:/app/data
-    depends_on:
-      - redis
+      - factbot_data:/app/data
+      - whisper_cache:/home/appuser/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  worker:
-    build: .
-    command: celery -A app.tasks worker --loglevel=info
+  # ------------------------------------------------------------- WORKER ------
+  # Proses terpisah utk job analisa panjang (download video, transkripsi
+  # faster-whisper, LLM, upload report). Image sama, command berbeda.
+  # Queue: tabel `jobs` di PostgreSQL (SKIP LOCKED) — lihat app/worker.py.
+  # Trade-off vs background-task in-process: lihat docs/DEPLOY_VPS.md §4.
+  bot-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: factbot/bot:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
     env_file: .env
+    networks:
+      - web
     volumes:
-      - ./data:/app/data
-    depends_on:
-      - redis
+      - factbot_data:/app/data
+      - whisper_cache:/home/appuser/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker", "--health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+  # ------------------------------------------------------ HERMES BRAIN ------
+  # Otak bot (profile factbot: SOUL/persona + memory knowledge + nanti
+  # orchestrator sub-agents). Phase 1: di-deploy standby — pipeline masih
+  # pakai DeepSeek langsung (app/pipeline/llm.py). Hermes brain di-wire
+  # post-hackathon (docs/architecture_multi_platform.md §12).
+  hermes-brain:
+    build:
+      context: ./hermes
+    image: factbot/hermes-brain:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      HERMES_HOME: /hermes-data
+      HERMES_PROFILE: factbot
+      WEBHOOK_ENABLED: "true"
+      WEBHOOK_PORT: "8644"
+      WEBHOOK_SECRET: "${HERMES_WEBHOOK_SECRET:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"          # model brain (deepseek-v4-flash)
+    volumes:
+      - hermes_profile:/hermes-data                        # state persist
+      - ./hermes-profiles/factbot:/hermes-data/profiles/factbot   # SOUL/config/skills (rw — Hermes tulis state cron/sessions)
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD", "hermes", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

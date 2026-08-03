@@ -19,6 +19,18 @@ router = APIRouter(prefix="/webhooks/meta", tags=["meta"])
 _processed_ids = set()
 _MAX_PROCESSED = 500
 
+# DM reply templates (FactBot branding)
+MENTION_REPLY = "Sorry, this feature is not supported yet — we're still in development phase. 🙏"
+ACCEPT_REPLY = "Thanks for sharing! 🙏 I've received your reel/post. Now please reply with the claim you want me to verify. ✍️"
+DENY_REPLY = "Sorry, currently I can only analyze reels or posts. Please send me a reel or post to verify. 🎬"
+CLAIM_RECEIVED_REPLY = "Got it! ✅ I'm verifying your claim now — this may take a moment. 🔍"
+
+# Media attachment types that trigger the accept flow
+ACCEPTED_MEDIA_TYPES = {"ig_reel", "reel", "ig_post", "post", "image", "video"}
+
+# One pending claim slot per sender (event-driven, NO time window). New media overwrites old.
+pending_claims = {}  # sender_id -> {"url": str, "title": str, "media_type": str}
+
 
 def _mark_processed(comment_id: str) -> bool:
     """Return True if already processed, False otherwise. Marks on first sight."""
@@ -120,7 +132,7 @@ async def _process_mention(
     # Build reply
     if claim:
         reply_msg = (
-            f"🤖 Hai @{from_user}! KlarifAI menerima klaim: "
+            f"🤖 Hai @{from_user}! FactBot menerima klaim: "
             f"\"{claim[:150]}\"\n\n"
             f"⏳ Verifikasi sedang diproses... "
             f"Mohon tunggu sebentar.\n\n"
@@ -128,7 +140,7 @@ async def _process_mention(
         )
     else:
         reply_msg = (
-            f"🤖 Hai @{from_user}! Terima kasih sudah men-tag KlarifAI.\n\n"
+            f"🤖 Hai @{from_user}! Terima kasih sudah men-tag FactBot.\n\n"
             f"Silakan sertakan klaim yang ingin dicek, contoh:\n"
             f"\"@factacheckfact beneran vaksin gratis ini hoax?\"\n\n"
             f"💡 Tag. Verifikasi. Percaya Lagi."
@@ -345,44 +357,8 @@ async def _reply_dm(recipient_id: str, text: str) -> bool:
         return False
 
 
-async def handle_message(value: dict):
-    """Handle Instagram DM / Messenger messages — auto-reply intro to every DM."""
-    msg_raw = value.get("message", "")
-
-    # Skip non-message events (read receipts, deliveries, seen, etc.) — no "message" key
-    if not msg_raw:
-        logger.info("⏭️ Non-message event (read/delivery/seen) — skipping")
-        return
-
-    mid = None
-    if isinstance(msg_raw, dict):
-        mid = msg_raw.get("mid")
-        msg_text = msg_raw.get("text", "")
-    else:
-        mid = value.get("mid")
-        msg_text = str(msg_raw) if msg_raw else ""
-    from_id = value.get("sender", {}).get("id", "unknown")
-    logger.info(f"💬 DM received from {from_id} (mid={mid}): \"{msg_text[:80]}\"")
-
-    # Skip if sender is the bot itself (echo loop prevention)
-    if from_id == settings.ig_business_id:
-        logger.info("⏭️ DM from bot itself (echo) — skipping")
-        return
-
-    # Dedup by mid so a duplicated webhook doesn't double-reply
-    if mid and _mark_processed(mid):
-        logger.info(f"⏭️ Already replied to DM {mid} — skipping")
-        return
-
-    # Auto-reply intro (English) to every incoming DM
-    intro = (
-        "Hello! 👋 I'm FactBot, KlarifAI's fact-checking assistant.\n\n"
-        "I'm here to help you analyze facts and news! 🔍\n"
-        "Currently in development phase — more features coming soon. 🚀"
-    )
-    await _reply_dm(from_id, intro)
-
-    # Scrape the full DM content via API (IG user token) for logging
+async def _log_dm_detail(mid: str, from_id: str) -> None:
+    """Fetch full DM detail via IG API for LOGGING only — never sends replies."""
     ig_token = settings.ig_user_token or settings.ig_basic_token
     if not mid or not ig_token:
         logger.info("No mid or IG token — skipping DM scrape")
@@ -417,10 +393,149 @@ async def handle_message(value: dict):
                 logger.info(f"🔗 Shared content: {share.get('link') or share.get('url', '')}")
             else:
                 logger.info(f"📎 Attachment: {json.dumps(att, ensure_ascii=False)[:300]}")
-
-        # If DM mentions the bot, treat as verification request
-        if dm_text and _is_mention(dm_text):
-            logger.info(f"🎯 DM @mention from @{dm_from}: \"{dm_text[:100]}\"")
-            # TODO: reply in DM thread via POST /{ig-id}/messages
     except Exception as e:
         logger.error(f"DM scrape error: {e}")
+
+
+async def _create_claim_job(media: dict, claim_text: str, sender_id: str) -> str | None:
+    """Buat job queue utk klaim via job store (SQLite lokal / Postgres VPS).
+
+    Phase 1 MVP: caption-only, TANPA download video — media_url/title dari
+    pending DM attachment, media_id belum tersedia di payload DM (kosong).
+    Graceful degradation (prinsip SOUL): kalau job store gagal (DB error dsb),
+    log error + return None — webhook TETAP membalas CLAIM_RECEIVED_REPLY.
+    """
+    try:
+        from app.jobs import build_report_id, get_job_store  # lazy: hindari circular import
+
+        store = get_job_store(settings)
+        platform = "instagram"  # DM via Instagram Messaging (Phase 1 fokus IG)
+        media_url = media.get("url", "") or ""
+        media_id = media.get("media_id", "") or ""
+        reel_video_id = media.get("reel_video_id", "") or ""
+        ig_post_media_id = media.get("ig_post_media_id", "") or ""
+
+        # Normalisasi source URL → URL PUBLIK Instagram, bukan CDN internal Meta
+        # (lookaside.fbsbx.com signed URL expired & butuh auth → gak bisa dibuka user lain).
+        # Prioritas: reel_video_id → ig_post_media_id → URL mentah (kalau sudah publik).
+        if not media_id:
+            media_id = reel_video_id or ig_post_media_id or ""
+        if "lookaside.fbsbx.com" in media_url or "ig_messaging_cdn" in media_url:
+            if reel_video_id:
+                media_url = f"https://www.instagram.com/reel/{reel_video_id}/"
+            elif ig_post_media_id:
+                media_url = f"https://www.instagram.com/p/{ig_post_media_id}/"
+
+        job = {
+            "report_id": build_report_id(platform, media_id, media_url),
+            "platform": platform,
+            "media_url": media_url,
+            "media_title": media.get("title", "") or "",
+            "media_id": media_id,
+            "claim_text": claim_text,
+            "sender_id": sender_id,
+        }
+        job_id = await store.create_job(job)
+        logger.info(f'📦 Job {job["report_id"]} created (status=queued, media_url={media_url})')
+        return job_id
+    except Exception:  # noqa: BLE001 — graceful degradation, jangan crash webhook
+        logger.exception(f"⚠️ Gagal membuat job utk {sender_id} — reply tetap dikirim")
+        return None
+
+
+async def handle_message(value: dict):
+    """Handle Instagram DM / Messenger messages — route by content:
+    template (mention pattern) → MENTION_REPLY, media reel/post → ACCEPT_REPLY
+    + pending claim state, text with pending claim → CLAIM_RECEIVED_REPLY,
+    text without pending → DENY_REPLY, payload without text/media → silent skip."""
+    msg_raw = value.get("message", "")
+
+    # Skip non-message events (read receipts, deliveries, seen, etc.) — no "message" key
+    if not msg_raw:
+        logger.info("⏭️ Non-message event (read/delivery/seen) — skipping")
+        return
+
+    mid = None
+    msg_text = ""
+    attachments = []
+    if isinstance(msg_raw, dict):
+        mid = msg_raw.get("mid")
+        msg_text = msg_raw.get("text", "") or ""
+        attachments = msg_raw.get("attachments", []) or []
+    else:
+        mid = value.get("mid")
+        msg_text = str(msg_raw) if msg_raw else ""
+    from_id = value.get("sender", {}).get("id", "unknown")
+    logger.info(f"💬 DM received from {from_id} (mid={mid}): \"{msg_text[:80]}\"")
+
+    # Skip if sender is the bot itself (echo loop prevention)
+    if from_id == settings.ig_business_id:
+        logger.info("⏭️ DM from bot itself (echo) — skipping")
+        return
+
+    # Dedup by mid so a duplicated webhook doesn't double-reply
+    if mid and _mark_processed(mid):
+        logger.info(f"⏭️ Already replied to DM {mid} — skipping")
+        return
+
+    # Log full DM detail via API (logging only — never replies)
+    await _log_dm_detail(mid, from_id)
+
+    # --- Routing ---
+    media_types = {a.get("type") for a in attachments if isinstance(a, dict) and a.get("type")}
+
+    # Template = mention pattern (all template attachments treated as mention)
+    if "template" in media_types:
+        logger.info("🎯 Template DM (mention pattern)")
+        await _reply_dm(from_id, MENTION_REPLY)
+        return
+
+    # Media reel/post → save as pending claim, ask for clarification
+    if media_types & ACCEPTED_MEDIA_TYPES:
+        url = ""
+        title = ""
+        media_type = ""
+        media_id = ""
+        reel_video_id = ""
+        ig_post_media_id = ""
+        for a in attachments:
+            if isinstance(a, dict) and a.get("type") in ACCEPTED_MEDIA_TYPES:
+                payload = a.get("payload", {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                url = payload.get("url", "") or ""
+                title = payload.get("title", "") or ""
+                media_type = a.get("type", "")
+                # ID yang bisa dibangun jadi URL publik (Phase 1: caption-only,
+                # tapi source link user harus bisa dibuka publik — bukan CDN Meta)
+                media_id = payload.get("media_id", "") or payload.get("id", "") or ""
+                reel_video_id = payload.get("reel_video_id", "") or ""
+                ig_post_media_id = payload.get("ig_post_media_id", "") or ""
+                break
+        pending_claims[from_id] = {
+            "url": url,
+            "title": title,
+            "media_type": media_type,
+            "media_id": media_id,
+            "reel_video_id": reel_video_id,
+            "ig_post_media_id": ig_post_media_id,
+        }
+        logger.info(f"🎬 Media DM accepted — awaiting claim (pending for {from_id})")
+        await _reply_dm(from_id, ACCEPT_REPLY)
+        return
+
+    # Text-only
+    if msg_text:
+        if from_id in pending_claims:
+            media = pending_claims.pop(from_id)  # consume-once, clear
+            logger.info(f'📝 Claim diterima dari {from_id} untuk media {media["url"]}: "{msg_text[:100]}" (pending cleared)')
+            # Enqueue ke job store (SQLite lokal / Postgres VPS) — graceful kalau gagal
+            await _create_claim_job(media, msg_text, from_id)
+            await _reply_dm(from_id, CLAIM_RECEIVED_REPLY)
+            return
+        logger.info("🚫 Text-only DM tanpa pending — denied")
+        await _reply_dm(from_id, DENY_REPLY)
+        return
+
+    # No text AND no media — weird payload, skip silently
+    logger.info("⏭️ DM without text or media — skipping")

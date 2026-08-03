@@ -24,3 +24,11 @@ data/*.txt
 
 # Tunnel
 *key*
+
+# Database lokal (SQLite)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Log runtime
+logs/

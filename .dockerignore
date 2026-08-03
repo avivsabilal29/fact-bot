@@ -1,0 +1,19 @@
+# --- Exclude dari image Docker (jangan pernah COPY .env / data / secrets) ---
+.git
+.gitignore
+venv
+node_modules
+logs
+data
+.env
+.env.*
+!.env.example
+*.log
+deploy
+docs
+*.pyc
+__pycache__
+.idea
+.vscode
+Dockerfile
+docker-compose*.yml

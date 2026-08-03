@@ -1,4 +1,4 @@
-# Web framework (minimal for webhook server)
+# Web framework (minimal untuk webhook server)
 fastapi==0.115.0
 uvicorn[standard]==0.30.0
 httpx==0.27.0
@@ -11,5 +11,18 @@ python-dotenv==1.0.1
 # Form parsing (webhook POST)
 python-multipart==0.0.9
 
+# --- Pipeline analisa video (docs/pipeline_video_analysis.md) ---
+yt-dlp>=2025.1.0          # download reel/video
+faster-whisper>=1.1.1     # transkripsi (butuh libgomp1 + ffmpeg di image)
+pytesseract>=0.3.13       # OCR overlay video
+opencv-python-headless>=4.10.0.84
+Pillow>=10.4.0
+
+# --- Worker & job queue (PostgreSQL, SKIP LOCKED) ---
+asyncpg>=0.29.0
+
+# --- Structured logging ke stdout (opsional, via docker json-file driver) ---
+python-json-logger>=2.0.7
+
 # NOTE: RAG pipeline deps (chromadb, sentence-transformers, llama-index)
-# added later in a separate service to keep this deploy lightweight.
+# ditambah nanti di service terpisah supaya image bot tetap ringan.

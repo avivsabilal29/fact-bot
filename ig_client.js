@@ -1,5 +1,5 @@
 /**
- * KlarifAI - Instagram Private API Client
+ * FactBot - Instagram Private API Client
  * Like Baileys for WhatsApp — direct login, read comments, reply.
  * 
  * This script runs alongside the Python FastAPI server.
@@ -163,7 +163,7 @@ async function checkMentions(ig) {
               // Reply to the comment
               const commentId = notif.comment_id || notif.target?.comment_id;
               if (commentId) {
-                const reply = `🤖 Hai @${username}! KlarifAI menerima klaim Anda. Verifikasi sedang diproses... 🔍`;
+                const reply = `🤖 Hai @${username}! FactBot menerima klaim Anda. Verifikasi sedang diproses... 🔍`;
                 await ig.media.comment({
                   mediaId: mediaId,
                   text: reply,
@@ -191,7 +191,7 @@ async function checkMentions(ig) {
 async function main() {
   console.log(`
   ╔══════════════════════════════════╗
-  ║   🤖 KlarifAI IG Private API    ║
+  ║   🤖 FactBot IG Private API     ║
   ║   Like Baileys for Instagram     ║
   ╚══════════════════════════════════╝
   `);
