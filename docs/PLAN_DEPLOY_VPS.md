@@ -54,8 +54,8 @@ cd ~/fact_bot_server
 #    edit ~/.ssh/config:  Host factbot → HostName 169.58.111.12
 ssh factbot "echo SSH-OK && hostname"          # tes koneksi
 
-# 2. Commit SEMUA perubahan session ini (27 file uncommitted!)
-git add -A && git commit -m "feat: phase1 pipeline + progress notifier + url normalize" && git push origin main
+# 2. Push commit yang SUDAH dibuat (0a01d5d — 42 files: pipeline, progress,
+#    URL fix, hermes brain, docs). Cek: git log --oneline -1
 
 # 3. Siapkan .env VPS (dari lokal + tambahan)
 cp .env .env.vps
@@ -148,13 +148,13 @@ tailscale funnel reset          # matikan Funnel
 |---|---|---|
 | 1 | **DB di VPS** | A) Postgres stack teman (butuh kredensial dari pemilik) — rekomendasi utk produksi · B) SQLite volume (paling cepat, MVP) |
 | 2 | **Kapan eksekusi** | Sekarang (semua komponen siap) atau nanti |
-| 3 | **Commit dulu?** | Ya — 27 file uncommitted harus di-commit sebelum clone di VPS |
+| 3 | **Commit dulu?** | ✅ **SUDAH** — commit `0a01d5d` (42 files) tinggal `git push origin main` |
 
 ---
 
 ## 🧠 Hermes Brain Layer — Instalasi Docker + Copy Profile `factbot`
 
-> **Konteks:** Hermes profile `factbot` (SOUL.md 6 section, `~/.hermes/profiles/factbot/`, 3.8MB)
+> **Konteks:** Hermes profile `factbot` (SOUL.md 6 section, `~/.hermes/profiles/factbot/`) — copy bersih di repo cuma **44K** (config.yaml + SOUL.md + profile.yaml; state runtime di-skip).
 > sudah dibuat & teruji di laptop. Ini "otak" bot: persona, memory knowledge, dan nanti
 > orchestrator sub-agents. **Phase 1 pipeline TIDAK butuh ini** (pakai DeepSeek langsung) —
 > service ini di-deploy SEKALIAN biar satu stack, tapi belum di-wire ke jalur kritis.
@@ -168,15 +168,21 @@ services:
   hermes-brain:  # ⭐ BARU — Hermes profile factbot (post-hackathon brain)
 ```
 
-### Langkah 1: Dockerfile Hermes (`hermes/Dockerfile` di repo) — ✅ SUDAH DIBUAT
+### Langkah 1: Dockerfile Hermes (`hermes/Dockerfile` di repo) — ✅ SUDAH DIBUAT & TERUJI
 
 ```dockerfile
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates git xz-utils \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-ENV PATH="/root/.local/bin:${PATH}"
+# Installer di-commit (DNS laptop salah resolve hermes-agent.nousresearch.com)
+COPY install.sh /tmp/hermes-install.sh
+# Pre-seed uv via pip → installer skip download astral.sh (baris 562)
+RUN pip install --no-cache-dir uv \
+    && mkdir -p /hermes-data/bin \
+    && cp "$(command -v uv)" /hermes-data/bin/uv \
+    && bash /tmp/hermes-install.sh && rm /tmp/hermes-install.sh
+ENV PATH="/root/.local/bin:/usr/local/bin:${PATH}"
 ENV HERMES_HOME=/hermes-data
 ENV HERMES_PROFILE=factbot
 RUN mkdir -p /hermes-data && chmod 755 /hermes-data
@@ -184,6 +190,9 @@ WORKDIR /hermes-data
 EXPOSE 8644
 CMD ["hermes", "gateway", "run"]
 ```
+
+> ✅ **Terbukti:** image `factbot/hermes-brain:test` (2.61GB) build sukses, hermes v0.19.1
+> jalan, test persona 18s (honcho off).
 
 > ⚠️ **Pitfall build yang sudah ditemukan:**
 > 1. Installer butuh `xz-utils` (extract Node tarball) + `git` — tanpa itu build gagal `tar: xz: Cannot exec`.
@@ -193,8 +202,8 @@ CMD ["hermes", "gateway", "run"]
 ## 🧠 Hermes Brain — Konfigurasi (sudah di-setup)
 
 - **Model:** `deepseek-v4-flash` (provider deepseek, base `https://api.deepseek.com/v1`) — di `config.yaml` profile
-- **API key:** `DEEPSEEK_API_KEY` — dual jalur: env compose `${DEEPSEEK_API_KEY}` + `.env` profile (mount read-only)
-- **Honcho memory: DISABLED** (`memory_enabled: false` + `user_profile_enabled: false`) — user: "kalau oake honcho agak lama soalnya". Bot pure: SOUL.md + config, tanpa dependency memory eksternal. Konteks per-user tetap di DB bot (jobs/pending).
+- **API key:** `DEEPSEEK_API_KEY` — dual jalur: env compose `${DEEPSEEK_API_KEY:-}` + `.env` profile (mount rw)
+- **Honcho memory: DISABLED** (`memory_enabled: false` + `user_profile_enabled: false`) — user: "kalau oake honcho agak lama soalnya". Disable di **kedua** config: copy repo (`hermes-profiles/factbot/` — yang di-mount ke container VPS) DAN profile asli laptop (biar hasil test konsisten). Bot pure: SOUL.md + config, tanpa dependency memory eksternal. Konteks per-user tetap di DB bot (jobs/pending). **Terbukti 2.7× lebih cepat: 49s → 18s.**
 
 ### Langkah 2: Service di `docker-compose.yml`
 
@@ -210,15 +219,15 @@ CMD ["hermes", "gateway", "run"]
       HERMES_PROFILE: factbot
       WEBHOOK_ENABLED: "true"
       WEBHOOK_PORT: "8644"
-      WEBHOOK_SECRET: "${HERMES_WEBHOOK_SECRET}"
-      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"       # model brain (deepseek-v4-flash)
+      WEBHOOK_SECRET: "${HERMES_WEBHOOK_SECRET:-}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"       # model brain (deepseek-v4-flash)
     volumes:
-      - hermes_profile:/hermes-data                 # profile + state persist
-      - ./hermes-profiles/factbot:/hermes-data/profiles/factbot:ro   # SOUL/config/skills
+      - hermes_profile:/hermes-data                 # state persist
+      - ./hermes-profiles/factbot:/hermes-data/profiles/factbot   # SOUL/config/skills (rw — Hermes tulis state cron/sessions)
     networks:
       - web
     healthcheck:
-      test: ["CMD", "hermes", "gateway", "health"]
+      test: ["CMD", "hermes", "--version"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -241,29 +250,32 @@ volumes:
 
 ### Langkah 3: Copy Profile `factbot` dari Laptop ke VPS
 
-```bash
-# Dari laptop — profile cuma 3.8MB, scp langsung:
-scp -r ~/.hermes/profiles/factbot/ factbot:/opt/factbot/hermes-profiles/factbot/
+**⚠️ UPDATE: profile di repo (hermes-profiles/) SUDAH di-commit ke git** (commit 0a01d5d) —
+jadi di VPS cukup `git clone` + `git pull`, TIDAK perlu scp manual:
 
-# Atau rsync (lebih aman kalau ada symlink):
-rsync -avz ~/.hermes/profiles/factbot/ factbot:/opt/factbot/hermes-profiles/factbot/
+```bash
+# Di VPS — profile sudah ikut repo (hermes-profiles/factbot/, 44K bersih):
+ls /opt/factbot/hermes-profiles/factbot/    # config.yaml + SOUL.md + profile.yaml
+
+# Kalau mau profile dari laptop yg lebih fresh (mis. setelah edit SOUL):
+scp -r ~/.hermes/profiles/factbot/ factbot:/opt/factbot/hermes-profiles/factbot/
 ```
 
-**Yang penting ikut ter-copy (3.8MB total):**
+**Yang ada di repo (44K, ke-commit):**
 
-| Isi | Fungsi | Di-copy? |
+| Isi | Fungsi | Di-repo? |
 |---|---|---|
 | `SOUL.md` (9.7KB) | Persona FactBot (IDENTITY/MISSION/RULES/WORKFLOW/MEMORY MODEL/OUTPUT) | ✅ |
-| `config.yaml` (2.9KB) | Model deepseek-v4-flash + provider | ✅ |
+| `config.yaml` (2.9KB) | Model deepseek-v4-flash + provider + **honcho disabled** | ✅ |
 | `profile.yaml` (235B) | Marker profile | ✅ |
-| `.env` | DEEPSEEK_API_KEY | ✅ (chmod 600) |
-| `memories/`, `skills/` | Knowledge bot (kosong dulu — siap diisi) | ✅ |
-| `logs/`, `sandboxes/`, `image_cache/`, `auth.lock` | State runtime — **TIDAK perlu** (fresh di VPS) | ❌ Skip |
+| `.env` | DEEPSEEK_API_KEY — **TIDAK ke-commit** (gitignore) | ❌ → inject via compose env |
+| `memories/`, `skills/` | Knowledge bot (kosong dulu — siap diisi) | ✅ (folder) |
 
 **Catatan penting:**
-- `HERMES_HOME=/hermes-data` → Hermes di container baca profile dari volume mount
-- Secrets di `.env` profile → **jangan commit ke git**; biarkan volume mount saja (atau inject via env)
-- Kalau mau bawa memory/session lama → `scp -r` folder `memories/` juga (opsional, MVP belum ada isinya)
+- **Secrets (`DEEPSEEK_API_KEY`) TIDAK di-repo** → di VPS di-inject lewat `docker compose`
+  environment (`${DEEPSEEK_API_KEY:-}`) dari root `.env` project.
+- Mount profile **rw** (bukan ro) — Hermes butuh nulis state (cron/sessions) ke profile dir.
+- Kalau mau bawa memory/session lama → `scp -r` folder `memories/` (opsional, MVP belum ada isinya).
 
 ### Langkah 4: Verifikasi Hermes Brain di VPS
 
