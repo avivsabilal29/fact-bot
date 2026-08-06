@@ -1,0 +1,19 @@
+# SearXNG settings — referensi dari laptop Aviv (~/searxng/core-config/settings.yml)
+# secret_key DIGENERATE BARU untuk VPS (jangan pakai secret laptop)
+
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  enable_http2: false
+
+server:
+  secret_key: "K1JPsyw0RObNgHPhKFtCXdIz"
+  image_proxy: true
+  limiter: false   # internal network (docker) — matikan rate-limit IP biar bot/worker bisa akses bebas

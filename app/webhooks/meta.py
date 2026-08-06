@@ -29,7 +29,8 @@ CLAIM_RECEIVED_REPLY = "Got it! ✅ I'm verifying your claim now — this may ta
 ACCEPTED_MEDIA_TYPES = {"ig_reel", "reel", "ig_post", "post", "image", "video"}
 
 # One pending claim slot per sender (event-driven, NO time window). New media overwrites old.
-pending_claims = {}  # sender_id -> {"url": str, "title": str, "media_type": str}
+# _platform disimpan agar claim job dibuat via bridge platform yang benar (FB/IG).
+pending_claims = {}  # sender_id -> {"url": str, "title": str, "media_type": str, "_platform": str}
 
 
 def _mark_processed(comment_id: str) -> bool:
@@ -192,6 +193,10 @@ async def handle_webhook(request: Request):
 
     entries = payload.get("entry", [])
 
+    # Platform detection (broker): object=page → Facebook Messenger, else Instagram.
+    # Ditandai sekali di sini (msg["_platform"]) → dipakai handle_message / _create_claim_job.
+    platform = "facebook" if payload.get("object") == "page" else "instagram"
+
     for entry in entries:
         # Format 1: changes[] — comments, mentions, feed (Instagram Graph webhook)
         changes = entry.get("changes", [])
@@ -208,6 +213,9 @@ async def handle_webhook(request: Request):
                     await handle_mention(value)
                 elif field == "feed":
                     await handle_feed_event(value)
+                elif field == "mention":
+                    # FB mention (komentar di postingan) — balas MENTION_REPLY via DM
+                    await handle_fb_mention(value, platform)
                 elif field == "messages":
                     await handle_message(value)
                 else:
@@ -216,9 +224,10 @@ async def handle_webhook(request: Request):
                 import traceback
                 logger.error(f"Error handling {field}: {e}\n{traceback.format_exc()}")
 
-        # Format 2: messaging[] — DM (Messaging webhook)
+        # Format 2: messaging[] — DM (Messaging webhook) — tandai platform tiap msg
         messaging = entry.get("messaging", [])
         for msg in messaging:
+            msg["_platform"] = platform
             try:
                 await handle_message(msg)
             except Exception as e:
@@ -226,6 +235,60 @@ async def handle_webhook(request: Request):
                 logger.error(f"Error handling DM: {e}\n{traceback.format_exc()}")
 
     return {"status": "received"}
+
+
+async def _fetch_fb_commenter(comment_id: str) -> str | None:
+    """Fetch commenter PSID dari komentar FB via Graph API — best-effort.
+
+    GET graph.facebook.com/v26.0/{comment_id}?fields=from{id,name},message + Page token.
+    Return from.id (PSID) atau None kalau gagal (jangan crash).
+    """
+    token = settings.meta_page_access_token
+    if not comment_id or not token:
+        logger.info("No comment_id or Page token — skipping FB commenter fetch")
+        return None
+    try:
+        url = f"https://graph.facebook.com/v26.0/{comment_id}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params={
+                "fields": "from{id,name},message",
+                "access_token": token,
+            })
+        if resp.is_error:
+            logger.warning(f"Failed to fetch FB commenter {comment_id}: {resp.text[:200]}")
+            return None
+        data = resp.json()
+        from_raw = data.get("from") or {}
+        return (from_raw.get("id") or "") or None
+    except Exception as e:
+        logger.warning(f"FB commenter fetch exception: {e}")
+        return None
+
+
+async def handle_fb_mention(value: dict, platform: str = "facebook") -> None:
+    """Handle Facebook mention (field=mention) — komentar di postingan.
+
+    Payload TIDAK berisi sender id, cuma comment_id. Alur (behavior disamain dgn IG):
+    GET /{comment_id}?fields=from → PSID commenter → _reply_dm(from_id, MENTION_REPLY,
+    'facebook'). Best-effort: semua kegagalan = log warning, jangan crash.
+    """
+    comment_id = value.get("comment_id", "") or ""
+    logger.info(f"🔔 FB mention event (comment_id={comment_id})")
+
+    if not comment_id or platform != "facebook":
+        logger.info("  ⏭️ Mention tanpa comment_id / bukan FB — no-op")
+        return
+
+    # Dedup by comment_id agar webhook duplikat tidak double-reply
+    if _mark_processed(comment_id):
+        logger.info(f"Already processed FB mention {comment_id}, skipping")
+        return
+
+    from_id = await _fetch_fb_commenter(comment_id)
+    if not from_id:
+        logger.warning(f"  ⏭️ Tidak dapat PSID commenter utk {comment_id} — skip reply")
+        return
+    await _reply_dm(from_id, MENTION_REPLY, "facebook")
 
 
 async def handle_instagram_comment(value: dict):
@@ -332,14 +395,27 @@ async def handle_feed_event(value: dict):
         # TODO: Implement Facebook reply
 
 
-async def _reply_dm(recipient_id: str, text: str) -> bool:
-    """Send a DM reply via Instagram Messaging API (POST /{ig-id}/messages)."""
-    ig_id = settings.ig_business_id
-    token = settings.ig_user_token or settings.ig_basic_token
-    if not ig_id or not token:
-        logger.warning("No ig_business_id or IG token configured for DM reply")
-        return False
-    url = f"https://graph.instagram.com/v26.0/{ig_id}/messages"
+async def _reply_dm(recipient_id: str, text: str, platform: str = "instagram") -> bool:
+    """Send a DM reply via the platform's Messaging API.
+
+    instagram → POST graph.instagram.com/v26.0/{ig_business_id}/messages (IG token)
+    facebook  → POST graph.facebook.com/v26.0/{meta_page_id}/messages (Page token)
+    Body sama untuk kedua platform: {"recipient": {"id": ...}, "message": {"text": ...}}
+    """
+    if platform == "facebook":
+        page_id = settings.meta_page_id
+        token = settings.meta_page_access_token
+        if not page_id or not token:
+            logger.warning("No meta_page_id or Page token configured for FB DM reply")
+            return False
+        url = f"https://graph.facebook.com/v26.0/{page_id}/messages"
+    else:
+        ig_id = settings.ig_business_id
+        token = settings.ig_user_token or settings.ig_basic_token
+        if not ig_id or not token:
+            logger.warning("No ig_business_id or IG token configured for DM reply")
+            return False
+        url = f"https://graph.instagram.com/v26.0/{ig_id}/messages"
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
@@ -350,15 +426,45 @@ async def _reply_dm(recipient_id: str, text: str) -> bool:
         if resp.is_error:
             logger.error(f"DM reply failed ({resp.status_code}): {resp.text[:200]}")
             return False
-        logger.info(f"✅ DM reply sent to {recipient_id}")
+        logger.info(f"✅ DM reply sent to {recipient_id} via {platform}")
         return True
     except Exception as e:
         logger.error(f"DM reply exception: {e}")
         return False
 
 
-async def _log_dm_detail(mid: str, from_id: str) -> None:
-    """Fetch full DM detail via IG API for LOGGING only — never sends replies."""
+async def _log_dm_detail(mid: str, from_id: str, platform: str = "instagram") -> None:
+    """Fetch full DM detail via platform API for LOGGING only — never sends replies.
+
+    instagram → graph.instagram.com/v26.0/{mid} (IG token) — existing behavior.
+    facebook  → graph.facebook.com/v26.0/{mid}?fields=... (Page token).
+                JANGAN fetch mid FB (m_...) ke graph.instagram.com (selalu 400);
+                kalau fetch FB gagal → skip (log info), jangan crash.
+    """
+    if platform == "facebook":
+        token = settings.meta_page_access_token
+        if not mid or not token:
+            logger.info("No mid or Page token — skipping FB DM scrape")
+            return
+        try:
+            url = f"https://graph.facebook.com/v26.0/{mid}"
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, params={
+                    "fields": "id,created_time,message,from,to,attachments",
+                    "access_token": token,
+                })
+            if resp.is_error:
+                logger.info(f"⏭️ FB DM scrape skipped ({resp.status_code}): {resp.text[:200]}")
+                return
+            detail = resp.json()
+            dm_from = (detail.get("from") or {}).get("id", from_id)
+            dm_text = detail.get("message", "") or ""
+            logger.info(f"📄 FB DM detail: from={dm_from} | text=\"{dm_text[:200]}\"")
+        except Exception as e:
+            logger.info(f"⏭️ FB DM scrape skipped (exception: {e})")
+        return
+
+    # --- Instagram path (existing behavior) ---
     ig_token = settings.ig_user_token or settings.ig_basic_token
     if not mid or not ig_token:
         logger.info("No mid or IG token — skipping DM scrape")
@@ -409,18 +515,20 @@ async def _create_claim_job(media: dict, claim_text: str, sender_id: str) -> str
         from app.jobs import build_report_id, get_job_store  # lazy: hindari circular import
 
         store = get_job_store(settings)
-        platform = "instagram"  # DM via Instagram Messaging (Phase 1 fokus IG)
+        # Platform asal DM (dari broker handle_webhook): media bawa "_platform"
+        platform = media.get("_platform", "instagram")
         media_url = media.get("url", "") or ""
         media_id = media.get("media_id", "") or ""
         reel_video_id = media.get("reel_video_id", "") or ""
         ig_post_media_id = media.get("ig_post_media_id", "") or ""
 
-        # Normalisasi source URL → URL PUBLIK Instagram, bukan CDN internal Meta
+        # Normalisasi source URL → URL PUBLIK, bukan CDN internal Meta
         # (lookaside.fbsbx.com signed URL expired & butuh auth → gak bisa dibuka user lain).
         # Prioritas: reel_video_id → ig_post_media_id → URL mentah (kalau sudah publik).
+        # HANYA utk Instagram — URL FB (facebook.com/reel|posts/pfbid...) sudah publik.
         if not media_id:
             media_id = reel_video_id or ig_post_media_id or ""
-        if "lookaside.fbsbx.com" in media_url or "ig_messaging_cdn" in media_url:
+        if platform == "instagram" and ("lookaside.fbsbx.com" in media_url or "ig_messaging_cdn" in media_url):
             if reel_video_id:
                 media_url = f"https://www.instagram.com/reel/{reel_video_id}/"
             elif ig_post_media_id:
@@ -447,8 +555,11 @@ async def handle_message(value: dict):
     """Handle Instagram DM / Messenger messages — route by content:
     template (mention pattern) → MENTION_REPLY, media reel/post → ACCEPT_REPLY
     + pending claim state, text with pending claim → CLAIM_RECEIVED_REPLY,
-    text without pending → DENY_REPLY, payload without text/media → silent skip."""
+    text without pending → DENY_REPLY, payload without text/media → silent skip.
+    Platform (dari broker handle_webhook) diteruskan ke semua reply DM."""
     msg_raw = value.get("message", "")
+    # Platform asal: ditandai broker di handle_webhook (msg["_platform"]).
+    platform = value.get("_platform", "instagram")
 
     # Skip non-message events (read receipts, deliveries, seen, etc.) — no "message" key
     if not msg_raw:
@@ -466,10 +577,12 @@ async def handle_message(value: dict):
         mid = value.get("mid")
         msg_text = str(msg_raw) if msg_raw else ""
     from_id = value.get("sender", {}).get("id", "unknown")
-    logger.info(f"💬 DM received from {from_id} (mid={mid}): \"{msg_text[:80]}\"")
+    logger.info(f"💬 DM received from {from_id} (mid={mid}, platform={platform}): \"{msg_text[:80]}\"")
 
-    # Skip if sender is the bot itself (echo loop prevention)
-    if from_id == settings.ig_business_id:
+    # Skip if sender is the bot itself (echo loop prevention) — platform-aware:
+    # FB echo = sender == Page ID, IG echo = sender == IG business ID
+    bot_self = settings.meta_page_id if platform == "facebook" else settings.ig_business_id
+    if from_id == bot_self:
         logger.info("⏭️ DM from bot itself (echo) — skipping")
         return
 
@@ -479,7 +592,7 @@ async def handle_message(value: dict):
         return
 
     # Log full DM detail via API (logging only — never replies)
-    await _log_dm_detail(mid, from_id)
+    await _log_dm_detail(mid, from_id, platform)
 
     # --- Routing ---
     media_types = {a.get("type") for a in attachments if isinstance(a, dict) and a.get("type")}
@@ -487,7 +600,7 @@ async def handle_message(value: dict):
     # Template = mention pattern (all template attachments treated as mention)
     if "template" in media_types:
         logger.info("🎯 Template DM (mention pattern)")
-        await _reply_dm(from_id, MENTION_REPLY)
+        await _reply_dm(from_id, MENTION_REPLY, platform)
         return
 
     # Media reel/post → save as pending claim, ask for clarification
@@ -519,9 +632,10 @@ async def handle_message(value: dict):
             "media_id": media_id,
             "reel_video_id": reel_video_id,
             "ig_post_media_id": ig_post_media_id,
+            "_platform": platform,
         }
-        logger.info(f"🎬 Media DM accepted — awaiting claim (pending for {from_id})")
-        await _reply_dm(from_id, ACCEPT_REPLY)
+        logger.info(f"🎬 Media DM accepted — awaiting claim (pending for {from_id}, platform={platform})")
+        await _reply_dm(from_id, ACCEPT_REPLY, platform)
         return
 
     # Text-only
@@ -531,10 +645,10 @@ async def handle_message(value: dict):
             logger.info(f'📝 Claim diterima dari {from_id} untuk media {media["url"]}: "{msg_text[:100]}" (pending cleared)')
             # Enqueue ke job store (SQLite lokal / Postgres VPS) — graceful kalau gagal
             await _create_claim_job(media, msg_text, from_id)
-            await _reply_dm(from_id, CLAIM_RECEIVED_REPLY)
+            await _reply_dm(from_id, CLAIM_RECEIVED_REPLY, platform)
             return
         logger.info("🚫 Text-only DM tanpa pending — denied")
-        await _reply_dm(from_id, DENY_REPLY)
+        await _reply_dm(from_id, DENY_REPLY, platform)
         return
 
     # No text AND no media — weird payload, skip silently

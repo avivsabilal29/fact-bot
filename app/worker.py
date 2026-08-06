@@ -46,6 +46,7 @@ import signal
 import socket
 import sys
 import time as _time
+from functools import partial
 from typing import TYPE_CHECKING
 
 from app.config import settings
@@ -160,16 +161,21 @@ def _payload_of(job: dict) -> dict:
 
 
 async def _notify_user(job, message: str) -> None:
-    """Kirim DM ke sender (payload.sender_id ATAU field flat) — best effort."""
+    """Kirim DM ke sender (payload.sender_id ATAU field flat) — best effort.
+
+    Platform diambil dari job (payload['platform'] / field flat) dan
+    diteruskan ke send_result_dm → endpoint DM yang benar per platform.
+    """
     payload = _payload_of(job)
     sender_id = payload.get("sender_id") or job.get("sender_id")
     if not sender_id:
         logger.warning("job %s: tidak ada sender_id di job — DM tidak dikirim", job.get("id"))
         return
+    platform = payload.get("platform") or job.get("platform") or "instagram"
     try:
         from app.api.reply import send_result_dm  # lazy — hindari circular
 
-        await send_result_dm(str(sender_id), message)
+        await send_result_dm(str(sender_id), message, platform=platform)
     except Exception as e:  # noqa: BLE001
         logger.error("job %s: gagal kirim DM ke %s: %s", job.get("id"), sender_id, e)
 
@@ -197,6 +203,7 @@ def _make_progress(job) -> ProgressNotifier | None:
     sender_id = payload.get("sender_id") or job.get("sender_id")
     if not sender_id:
         return None
+    platform = payload.get("platform") or job.get("platform") or "instagram"
     try:
         from app.pipeline.progress import ProgressNotifier  # lazy — modul paralel
         from app.api.reply import send_progress_dm  # lazy — hindari circular
@@ -206,7 +213,13 @@ def _make_progress(job) -> ProgressNotifier | None:
         )
         return None
     try:
-        return ProgressNotifier(str(sender_id), str(job.get("id")), send_fn=send_progress_dm)
+        # partial mengikat platform job → send_fn(sender_id, text) tetap
+        # 2-arg (kontrak ProgressNotifier), platform sampai ke send_progress_dm.
+        return ProgressNotifier(
+            str(sender_id),
+            str(job.get("id")),
+            send_fn=partial(send_progress_dm, platform=platform),
+        )
     except Exception:  # noqa: BLE001
         logger.exception(
             "job %s: progress konstruksi gagal — progress DM non-aktif", job.get("id")

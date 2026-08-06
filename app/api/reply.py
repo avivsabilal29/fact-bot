@@ -17,22 +17,43 @@ BASE_IG = "https://graph.instagram.com/v25.0"
 RESULT_DM_TEMPLATE = "✅ Verification complete! Here's your result: {public_url} 🔍"
 
 
-async def send_result_dm(sender_id: str, public_url: str) -> bool:
-    """Kirim hasil verifikasi (public_url) ke DM Instagram user.
+def _dm_endpoint(platform: str) -> tuple[str, str] | None:
+    """Pilih endpoint DM + token per platform — None bila belum dikonfigurasi.
 
-    Sama pola _reply_dm di app/webhooks/meta.py: POST
-    graph.instagram.com/v26.0/{ig_business_id}/messages.
+    facebook  → graph.facebook.com/v26.0/{meta_page_id}/messages + Page token
+    instagram → graph.instagram.com/v26.0/{ig_business_id}/messages + IG token
+    (ig_user_token, fallback ig_basic_token).
+    """
+    if platform == "facebook":
+        recipient_id = settings.meta_page_id
+        token = settings.meta_page_access_token
+        if not recipient_id or not token:
+            logger.warning("DM: meta_page_id atau Page token belum dikonfigurasi")
+            return None
+        url = f"https://graph.facebook.com/v26.0/{recipient_id}/messages"
+    else:
+        recipient_id = settings.ig_business_id
+        token = settings.ig_user_token or settings.ig_basic_token
+        if not recipient_id or not token:
+            logger.warning("DM: ig_business_id atau IG token belum dikonfigurasi")
+            return None
+        url = f"https://graph.instagram.com/v26.0/{recipient_id}/messages"
+    return url, token
+
+
+async def send_result_dm(sender_id: str, public_url: str, platform: str = "instagram") -> bool:
+    """Kirim hasil verifikasi (public_url) ke DM user — platform-aware.
+
+    Sama pola _reply_dm di app/webhooks/meta.py: POST .../messages.
+    platform='facebook' → graph.facebook.com (Page token); default
+    'instagram' → graph.instagram.com (IG token).
     Return True bila terkirim; gagal/konfigurasi kosong → False (di-log).
     """
-    ig_id = settings.ig_business_id
-    token = settings.ig_user_token or settings.ig_basic_token
-    if not ig_id or not token:
-        logger.warning(
-            "send_result_dm: ig_business_id atau IG token belum dikonfigurasi"
-        )
+    endpoint = _dm_endpoint(platform)
+    if endpoint is None:
         return False
+    url, token = endpoint
     message = RESULT_DM_TEMPLATE.format(public_url=public_url)
-    url = f"https://graph.instagram.com/v26.0/{ig_id}/messages"
     payload = {
         "recipient": {"id": sender_id},
         "message": {"text": message},
@@ -43,32 +64,28 @@ async def send_result_dm(sender_id: str, public_url: str) -> bool:
         if resp.is_error:
             logger.error(f"send_result_dm failed ({resp.status_code}): {resp.text[:200]}")
             return False
-        logger.info(f"✅ Result DM sent to {sender_id}")
+        logger.info(f"✅ Result DM sent to {sender_id} via {platform}")
         return True
     except Exception as e:
         logger.error(f"send_result_dm exception: {e}")
         return False
 
 
-async def send_progress_dm(sender_id: str, text: str) -> bool:
-    """Kirim pesan progress (teks bebas) ke DM Instagram user — best effort.
+async def send_progress_dm(sender_id: str, text: str, platform: str = "instagram") -> bool:
+    """Kirim pesan progress (teks bebas) ke DM user — best effort, platform-aware.
 
-    Endpoint & token sama dgn send_result_dm: POST
-    graph.instagram.com/v26.0/{ig_business_id}/messages dengan
-    IG_USER_TOKEN (fallback ig_basic_token). Dipakai worker
-    (app/worker.py → ProgressNotifier) utk update bertahap ke user.
+    Endpoint & token dipilih per platform (sama dgn send_result_dm):
+    facebook → graph.facebook.com (Page token); instagram →
+    graph.instagram.com (IG_USER_TOKEN, fallback ig_basic_token).
+    Dipakai worker (app/worker.py → ProgressNotifier) utk update bertahap.
 
     Gagal → log warning + return False — progress GAGAL tidak boleh
     crash pipeline worker (graceful degradation).
     """
-    ig_id = settings.ig_business_id
-    token = settings.ig_user_token or settings.ig_basic_token
-    if not ig_id or not token:
-        logger.warning(
-            "send_progress_dm: ig_business_id atau IG token belum dikonfigurasi"
-        )
+    endpoint = _dm_endpoint(platform)
+    if endpoint is None:
         return False
-    url = f"https://graph.instagram.com/v26.0/{ig_id}/messages"
+    url, token = endpoint
     payload = {
         "recipient": {"id": sender_id},
         "message": {"text": text},
@@ -79,7 +96,7 @@ async def send_progress_dm(sender_id: str, text: str) -> bool:
         if resp.is_error:
             logger.warning(f"send_progress_dm failed ({resp.status_code}): {resp.text[:200]}")
             return False
-        logger.info(f"Progress DM sent to {sender_id}")
+        logger.info(f"Progress DM sent to {sender_id} via {platform}")
         return True
     except Exception as e:
         logger.warning(f"send_progress_dm exception: {e}")
