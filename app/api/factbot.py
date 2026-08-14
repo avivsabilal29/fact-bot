@@ -65,7 +65,7 @@ async def create_report(
         "platform": platform,
         "verdict": verdict.get("verdict"),
         "category": verdict.get("category"),
-        "summary": verdict.get("summary"),
+        "summary": (lambda s: s[:297] + "..." if s and len(s) > 300 else s)(verdict.get("summary")),
         "claim": verdict.get("claim"),
         "source_url": media_url,
         "content": markdown,

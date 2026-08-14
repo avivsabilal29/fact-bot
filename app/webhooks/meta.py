@@ -533,6 +533,9 @@ async def _create_claim_job(media: dict, claim_text: str, sender_id: str) -> str
                 media_url = f"https://www.instagram.com/reel/{reel_video_id}/"
             elif ig_post_media_id:
                 media_url = f"https://www.instagram.com/p/{ig_post_media_id}/"
+            elif media_id:
+                # fallback: media_id dari payload — coba sebagai reel (paling umum untuk konten viral)
+                media_url = f"https://www.instagram.com/reel/{media_id}/"
 
         job = {
             "report_id": build_report_id(platform, media_id, media_url),
