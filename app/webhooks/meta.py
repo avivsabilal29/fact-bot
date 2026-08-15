@@ -20,7 +20,7 @@ _processed_ids = set()
 _MAX_PROCESSED = 500
 
 # DM reply templates (FactBot branding)
-MENTION_REPLY = "Sorry, this feature is not supported yet — we're still in development phase. 🙏"
+MENTION_REPLY = "Sorry, this feature is not supported yet — we're still in development phase. 🙏 For now, you can send us a reel or post via DM, along with the claim you'd like us to analyze!"
 ACCEPT_REPLY = "Thanks for sharing! 🙏 I've received your reel/post. Now please reply with the claim you want me to verify. ✍️"
 DENY_REPLY = "Sorry, currently I can only analyze reels or posts. Please send me a reel or post to verify. 🎬"
 CLAIM_RECEIVED_REPLY = "Got it! ✅ I'm verifying your claim now — this may take a moment. 🔍"
