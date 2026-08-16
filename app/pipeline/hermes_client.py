@@ -114,8 +114,18 @@ def _extract_json_from_reply(reply: str) -> Optional[dict]:
         return None
 
     data["verdict"] = verdict
-    if "category" not in data or not data["category"]:
-        data["category"] = "general"
+
+    # Normalize category to match factbot.tech API validation schema
+    valid_categories = {
+        "health", "government", "politics", "disaster", 
+        "finance", "technology", "religion", "education", "other"
+    }
+    cat_raw = str(data.get("category") or "").lower().strip()
+    if cat_raw not in valid_categories:
+        data["category"] = "other"
+    else:
+        data["category"] = cat_raw
+
     if "confidence" not in data or data["confidence"] is None:
         data["confidence"] = 0.85
     if "language" not in data or not data["language"]:

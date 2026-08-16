@@ -35,6 +35,13 @@ async def run_analysis(job: dict) -> dict:
     if media_url:
         verdict["context"] = f"{caption}\n({media_url})"
 
+    # Derive title from summary when LLM did not supply one.
+    if not verdict.get("title"):
+        summary = verdict.get("summary") or ""
+        if len(summary) > 75:
+            summary = summary[:75].rsplit(" ", 1)[0]
+        verdict["title"] = f"Analysis: {summary}" if summary else ""
+
     markdown = await render_markdown(verdict)
 
     logger.info(
