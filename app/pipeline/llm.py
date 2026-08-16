@@ -23,16 +23,18 @@ VALID_CATEGORIES = {
 }
 
 SCHEMA_HINT = (
-    "Balas HANYA dengan SATU objek JSON (tanpa markdown fence, tanpa teks lain) "
-    "menggunakan skema persis berikut:\n"
+    "Reply ONLY with ONE JSON object (no markdown fence, no other text) "
+    "using exactly this schema:\n"
     '{"verdict": "fact|hoax|partly_true|unverified", '
     '"category": "health|government|politics|disaster|finance|technology|religion|education|other", '
-    '"summary": "<ringkasan 1-2 kalimat dalam Bahasa Indonesia>", '
-    '"claim": "<teks klaim yang dianalisa>", '
-    '"evidence": ["<fakta terverifikasi dengan sumber>"], '
-    '"sources": ["<nama/URL sumber rujukan>"], '
+    '"language": "ISO 639-1 code of the claim language e.g. id en ja ar es fr de", '
+    '"title": "fact-check report title max 80 chars IN THE SAME LANGUAGE as the claim NOT a copy of the claim question", '
+    '"summary": "1-2 sentence summary IN THE SAME LANGUAGE as the claim", '
+    '"claim": "claim text as stated by the user", '
+    '"evidence": ["verified fact with source IN THE SAME LANGUAGE as the claim"], '
+    '"sources": ["source name or URL"], '
     '"confidence": 0.0-1.0, '
-    '"notes": ["<catatan/peringatan>"]}'
+    '"notes": ["note or warning IN THE SAME LANGUAGE as the claim"]}'
 )
 
 
@@ -197,6 +199,70 @@ def _clamp_confidence(value) -> float:
     return max(0.0, min(1.0, conf))
 
 
+def _build_search_query(caption: str, claim: str) -> str:
+    """Build a concise search query from caption and claim for SearXNG.
+
+    Strips hashtags, @mentions, and URLs from caption, then combines key
+    caption words with the claim text, truncated to 120 chars.
+    """
+    import re
+    # Strip URLs, hashtags, @mentions from caption
+    clean_caption = re.sub(r"https?://\S+", "", caption)
+    clean_caption = re.sub(r"#\S+", "", clean_caption)
+    clean_caption = re.sub(r"@\S+", "", clean_caption)
+    clean_caption = " ".join(clean_caption.split())
+
+    # Strip "Is this true:"-style prefixes from claim
+    claim_words = claim.strip()
+    for prefix in ("Is this true:", "Apakah benar:", "Benarkah", "Fact check:"):
+        if claim_words.lower().startswith(prefix.lower()):
+            claim_words = claim_words[len(prefix):].strip()
+            break
+
+    # Combine: claim first, then caption context
+    combined = claim_words
+    if clean_caption:
+        combined = f"{claim_words} {clean_caption}"
+    return combined[:120].strip()
+
+
+async def searxng_search(query: str, max_results: int = 5) -> list[dict]:
+    """Query SearXNG and return list of {title, url, content} dicts.
+
+    Returns empty list on any error (graceful fallback — pipeline continues).
+    """
+    base_url = (settings.searxng_url or "").rstrip("/")
+    if not base_url:
+        logger.warning("searxng_search: SEARXNG_URL tidak dikonfigurasi, skip.")
+        return []
+
+    params = {
+        "q": query,
+        "format": "json",
+        "language": "id-ID",
+        "categories": "general,news",
+        "engines": "google,bing,duckduckgo",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{base_url}/search", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        out = []
+        for r in results[:max_results]:
+            content = str(r.get("content") or "").strip()
+            out.append({
+                "title": str(r.get("title") or "").strip(),
+                "url": str(r.get("url") or "").strip(),
+                "content": content[:300],
+            })
+        return out
+    except Exception as exc:
+        logger.warning("searxng_search gagal (query=%r): %s", query[:80], exc)
+        return []
+
+
 async def analyze_claim(caption: str, claim: str) -> dict:
     """Analisa klaim terhadap caption/title dan kembalikan dict verdict tervalidasi.
 
@@ -205,23 +271,46 @@ async def analyze_claim(caption: str, claim: str) -> dict:
     invalid, fallback ke verdict='unverified' + notes penjelas.
     Melempar LLMConfigError bila proxy tidak dikonfigurasi (permanent error).
     """
+    # Fetch web search results for grounding (graceful fallback if unavailable)
+    search_query = _build_search_query(caption, claim)
+    web_results = await searxng_search(search_query)
+
+    web_context = ""
+    if web_results:
+        snippets = []
+        for i, r in enumerate(web_results, 1):
+            snippet = f"{i}. [{r['title']}]({r['url']})"
+            if r["content"]:
+                snippet += f"\n   {r['content'][:300]}"
+            snippets.append(snippet)
+        web_context = "\n\nWEB SEARCH RESULTS:\n" + "\n".join(snippets)
+        logger.info("searxng_search: %d hasil untuk query=%r", len(web_results), search_query[:60])
+    else:
+        logger.warning("searxng_search: tidak ada hasil, pipeline lanjut tanpa web context.")
+
     system = (
-        "Kamu adalah analis fact-check untuk FactBot (KlarifAI). Tugasmu memverifikasi "
-        "klaim yang muncul di caption/title reel media sosial.\n"
-        "ATURAN TEGAS:\n"
-        "1. EVIDENCE-ONLY: hanya gunakan fakta yang bisa diverifikasi dari sumber terpercaya "
-        "(pemberitaan resmi, pernyataan pemerintah/lembaga, data publik). JANGAN PERNAH mengarang "
-        "fakta, angka, atau sumber.\n"
-        "2. Kalau bukti tidak cukup untuk memutuskan, verdict WAJIB 'unverified'.\n"
-        "3. 'verdict' dan 'category' WAJIB memakai nilai enum yang diberikan.\n"
-        "4. 'summary' dalam Bahasa Indonesia, 1-2 kalimat, netral.\n"
-        "5. 'confidence' mencerminkan seberapa yakin kamu terhadap verdict berdasarkan bukti "
-        "yang benar-benar ada (0.0-1.0)."
+        "You are a fact-check analyst for FactBot (KlarifAI). Your job is to verify "
+        "claims from social media reel/post captions.\n"
+        "STRICT RULES:\n"
+        "1. EVIDENCE-ONLY: only use facts verifiable from trusted sources "
+        "(official news, government/institution statements, public data). NEVER fabricate "
+        "facts, numbers, or sources.\n"
+        "2. If evidence is insufficient to decide, verdict MUST be 'unverified'.\n"
+        "3. 'verdict' and 'category' MUST use the enum values provided.\n"
+        "4. Detect the language of the claim text automatically and put its ISO 639-1 code "
+        "in the 'language' field (e.g. 'id' for Indonesian, 'en' for English, 'ja' for Japanese, "
+        "'ar' for Arabic, 'es' for Spanish).\n"
+        "5. Write ALL text fields (title, summary, evidence, notes) in THE SAME LANGUAGE as "
+        "the claim. Do NOT mix languages.\n"
+        "6. 'confidence' reflects how certain you are based on verifiable evidence (0.0-1.0).\n"
+        "7. If WEB SEARCH RESULTS are provided, use them as primary grounding evidence. "
+        "Cite URLs from search results as sources."
     )
 
     user = (
         f"Caption/title reel:\n{caption or '(kosong)'}\n\n"
-        f"Klaim yang harus diverifikasi:\n{claim}\n\n"
+        f"Klaim yang harus diverifikasi:\n{claim}"
+        f"{web_context}\n\n"
         f"{SCHEMA_HINT}"
     )
 
@@ -251,17 +340,21 @@ async def analyze_claim(caption: str, claim: str) -> dict:
             "Model tidak menghasilkan verdict valid; fallback ke 'unverified'.",
             "Detail: " + "; ".join(problems),
         ]
-        summary, evidence, sources, confidence = "", [], [], 0.0
+        title, summary, evidence, sources, confidence, language = "", "", [], [], 0.0, "id"
     else:
         notes = _clean_list(data.get("notes")) if isinstance(data, dict) else []
+        title = _clean_str(data.get("title")) if isinstance(data, dict) else ""
         summary = _clean_str(data.get("summary")) if isinstance(data, dict) else ""
         evidence = _clean_list(data.get("evidence")) if isinstance(data, dict) else []
         sources = _clean_list(data.get("sources")) if isinstance(data, dict) else []
         confidence = _clamp_confidence(data.get("confidence")) if isinstance(data, dict) else 0.0
+        language = (_clean_str(data.get("language")) or "id")[:2].lower() if isinstance(data, dict) else "id"
 
     return {
         "verdict": verdict,
         "category": category,
+        "language": language,
+        "title": title,
         "summary": summary,
         "claim": claim,
         "evidence": evidence,
