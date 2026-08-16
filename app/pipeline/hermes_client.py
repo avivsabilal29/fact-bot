@@ -46,7 +46,7 @@ def _format_hermes_prompt(caption: str, claim: str) -> str:
     )
 
 
-def _extract_json_from_reply(reply: str) -> Optional[dict]:
+def _extract_json_from_reply(reply: str, default_claim: str = "") -> Optional[dict]:
     """Parse JSON verdict from Hermes reply text.
 
     Handles raw JSON, JSON in markdown fences, or JSON embedded in text.
@@ -114,6 +114,16 @@ def _extract_json_from_reply(reply: str) -> Optional[dict]:
         return None
 
     data["verdict"] = verdict
+
+    # Map explanation -> summary if summary is missing
+    if not data.get("summary") and data.get("explanation"):
+        data["summary"] = data["explanation"]
+    elif not data.get("summary"):
+        data["summary"] = "Hasil analisa klaim oleh FactBot."
+
+    # Ensure claim field exists
+    if not data.get("claim"):
+        data["claim"] = default_claim
 
     # Normalize category to match factbot.tech API validation schema
     valid_categories = {
@@ -228,7 +238,7 @@ async def call_hermes(caption: str, claim: str, timeout: float = 120.0) -> Optio
                         logger.warning("Hermes run %s completed but output is empty", run_id)
                         return None
 
-                    verdict_dict = _extract_json_from_reply(reply_text)
+                    verdict_dict = _extract_json_from_reply(reply_text, claim)
                     if verdict_dict:
                         logger.info("Hermes run %s verdict: %s", run_id, verdict_dict.get("verdict"))
                         return verdict_dict

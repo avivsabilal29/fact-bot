@@ -53,9 +53,14 @@ async def create_report(
             "FACTBOT_API_KEY kosong — set di .env (lihat app/config.py)"
         )
 
+    summary = str(verdict.get("summary") or verdict.get("explanation") or "Hasil analisa klaim oleh FactBot.").strip()
+    if len(summary) > 300:
+        summary = summary[:297] + "..."
+
+    claim = str(verdict.get("claim") or name or "General claim").strip()
+
     title = str(verdict.get("title") or "").strip()
     if not title:
-        claim = str(verdict.get("claim") or "")
         title = f"Analisa: {claim[:60]}"
 
     body = {
@@ -64,9 +69,9 @@ async def create_report(
         "name": name,
         "platform": platform,
         "verdict": verdict.get("verdict"),
-        "category": verdict.get("category"),
-        "summary": (lambda s: s[:297] + "..." if s and len(s) > 300 else s)(verdict.get("summary")),
-        "claim": verdict.get("claim"),
+        "category": verdict.get("category") or "other",
+        "summary": summary,
+        "claim": claim,
         "source_url": media_url,
         "content": markdown,
     }
