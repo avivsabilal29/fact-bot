@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 
 from app.config import settings
 from app.webhooks.meta import router as meta_webhook_router
+from app.pipeline.hermes_callback import router as hermes_callback_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(meta_webhook_router)
+app.include_router(hermes_callback_router)
 
 
 @app.get("/")

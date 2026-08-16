@@ -294,6 +294,7 @@ async def analyze_claim(caption: str, claim: str) -> dict:
             hermes_res = await call_hermes(caption, claim, timeout=settings.llm_timeout_seconds)
             if hermes_res is not None:
                 logger.info(f"Hermes brain verdict: {hermes_res.get('verdict')}")
+                hermes_res["via_hermes"] = True
                 return hermes_res
             logger.warning("Hermes brain returned None — falling back to DeepSeek direct")
         except Exception as exc:

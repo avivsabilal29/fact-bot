@@ -1,8 +1,7 @@
-"""Hermes Brain webhook client for FactBot pipeline.
+"""Hermes Brain API client for FactBot pipeline.
 
-Sends claim analysis requests to Hermes brain (running in Docker with MCP SearXNG).
-Hermes acts as the AI engine: reads SOUL.md rules, calls searxng_web_search tool,
-returns a structured JSON verdict.
+Uses Hermes api_server (POST /v1/runs + GET /v1/runs/{run_id} polling) to run
+the agent with MCP SearXNG tools and get a structured JSON verdict.
 
 Falls back to DeepSeek direct if Hermes is unavailable.
 """
@@ -12,6 +11,7 @@ import hmac
 import json
 import logging
 import re
+import time
 from typing import Optional
 
 import httpx
@@ -21,6 +21,9 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 VALID_VERDICTS = {"fact", "hoax", "partly_true", "unverified"}
+
+# Poll interval for /v1/runs/{run_id} status checks
+_POLL_INTERVAL = 3.0
 
 
 def _sign_body(body_bytes: bytes, secret: str) -> str:
@@ -78,78 +81,163 @@ def _extract_json_from_reply(reply: str) -> Optional[dict]:
         logger.warning("Hermes reply is not a valid JSON object: %s", reply[:150])
         return None
 
-    verdict = str(data.get("verdict") or "").lower()
-    if verdict not in VALID_VERDICTS:
+    verdict_raw = str(data.get("verdict") or "").lower()
+    rating_raw = str(data.get("rating") or "").lower()
+
+    # Normalize common LLM verdict / rating variants
+    verdict_map = {
+        "true": "fact",
+        "fact": "fact",
+        "benar": "fact",
+        "false": "hoax",
+        "hoax": "hoax",
+        "fake": "hoax",
+        "salah": "hoax",
+        "partly_true": "partly_true",
+        "mostly_true": "partly_true",
+        "partially_true": "partly_true",
+        "unverified": "unverified",
+        "unknown": "unverified",
+    }
+    verdict = verdict_map.get(verdict_raw) or verdict_map.get(rating_raw)
+
+    # If raw verdict starts with 'benar' or 'true' or 'fact' (e.g. "BENAR (dengan catatan angka)")
+    if not verdict:
+        for prefix, norm_val in [("benar", "fact"), ("true", "fact"), ("fact", "fact"), ("salah", "hoax"), ("false", "hoax"), ("hoax", "hoax")]:
+            if verdict_raw.startswith(prefix) or rating_raw.startswith(prefix):
+                verdict = norm_val
+                break
+    if not verdict:
         logger.warning(
-            "Hermes returned invalid verdict '%s' (must be one of %s)", verdict, VALID_VERDICTS
+            "Hermes returned unmapped verdict '%s' (raw data: %s)", verdict_raw, data
         )
         return None
 
     data["verdict"] = verdict
+    if "category" not in data or not data["category"]:
+        data["category"] = "general"
+    if "confidence" not in data or data["confidence"] is None:
+        data["confidence"] = 0.85
+    if "language" not in data or not data["language"]:
+        data["language"] = "en"
     return data
 
 
 async def call_hermes(caption: str, claim: str, timeout: float = 120.0) -> Optional[dict]:
-    """Call Hermes brain webhook to analyze claim.
+    """Call Hermes brain via api_server /v1/runs to analyze claim.
 
-    Returns parsed verdict dict if successful, or None on any error/timeout.
-    Never raises an exception -- caller handles None by falling back to DeepSeek.
+    Flow:
+      1. POST /v1/runs with the analysis prompt
+      2. Poll GET /v1/runs/{run_id} until status is 'completed' or timeout
+      3. Extract assistant reply from run result
+      4. Parse JSON verdict from reply
 
-    Signs the request body with HMAC-SHA256 (X-Webhook-Signature V1 header)
-    using HERMES_WEBHOOK_SECRET (the factbot subscription secret).
+    Returns parsed verdict dict, or None if timeout/unavailable (caller falls back to DeepSeek).
     """
     base_url = (settings.hermes_webhook_url or "").rstrip("/")
     if not base_url:
         logger.info("HERMES_WEBHOOK_URL not set -- skipping Hermes brain")
         return None
 
-    secret = settings.hermes_webhook_secret or ""
-    if not secret:
-        logger.warning("HERMES_WEBHOOK_SECRET not set -- cannot sign Hermes webhook requests")
+    api_key = settings.hermes_webhook_secret or ""
+    if not api_key:
+        logger.warning("HERMES_WEBHOOK_SECRET not set -- cannot authenticate with Hermes api_server")
         return None
 
+    # api_server runs on port 8642, separate from webhook port 8644
+    # Replace webhook port with api_server port
+    api_url = base_url.replace(":8644", ":8642")
+
     prompt = _format_hermes_prompt(caption, claim)
-    payload = {
-        "platform": "webhook",
-        "user_id": "factbot-pipeline",
-        "message": prompt,
-    }
-    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    signature = _sign_body(body_bytes, secret)
 
     headers = {
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "X-Webhook-Signature": signature,  # Hermes generic V1 HMAC-SHA256
     }
 
-    url = f"{base_url}/webhooks/factbot"
+    run_payload = {
+        "input": prompt,
+        "stream": False,
+    }
+
+    deadline = time.monotonic() + timeout
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            logger.info("Calling Hermes brain at %s (timeout=%ss)...", url, timeout)
-            resp = await client.post(url, content=body_bytes, headers=headers)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Step 1: Start a run
+            logger.info("Starting Hermes run at %s/v1/runs...", api_url)
+            resp = await client.post(
+                f"{api_url}/v1/runs",
+                json=run_payload,
+                headers=headers,
+            )
             resp.raise_for_status()
+            run_data = resp.json()
+            run_id = run_data.get("id") or run_data.get("run_id")
+            if not run_id:
+                logger.warning("Hermes /v1/runs returned no run_id: %s", run_data)
+                return None
 
-            res_data = resp.json()
-            reply_text = ""
-            if isinstance(res_data, dict):
-                reply_text = str(res_data.get("reply") or res_data.get("message") or "")
-            elif isinstance(res_data, str):
-                reply_text = res_data
-            if not reply_text:
-                reply_text = resp.text
+            logger.info("Hermes run started: %s, polling for result...", run_id)
 
-            verdict_dict = _extract_json_from_reply(reply_text)
-            if verdict_dict:
-                logger.info("Hermes brain verdict: %s", verdict_dict.get("verdict"))
-                return verdict_dict
+            # Step 2: Poll until completed or timeout
+            while time.monotonic() < deadline:
+                await __import__("asyncio").sleep(_POLL_INTERVAL)
 
-            logger.warning("Failed to parse JSON verdict from Hermes reply: %s", reply_text[:200])
+                poll_resp = await client.get(
+                    f"{api_url}/v1/runs/{run_id}",
+                    headers=headers,
+                )
+                poll_resp.raise_for_status()
+                run_status = poll_resp.json()
+
+                status = run_status.get("status", "")
+                logger.debug("Hermes run %s status: %s", run_id, status)
+
+                if status == "completed":
+                    # Extract assistant reply from output
+                    output = run_status.get("output") or run_status.get("result") or ""
+                    if isinstance(output, list):
+                        # OpenAI Responses API format: list of output items
+                        for item in output:
+                            if isinstance(item, dict):
+                                content = item.get("content") or ""
+                                if isinstance(content, list):
+                                    for c in content:
+                                        if isinstance(c, dict) and c.get("type") == "output_text":
+                                            output = c.get("text", "")
+                                            break
+                                elif isinstance(content, str):
+                                    output = content
+                                    break
+                    elif isinstance(output, dict):
+                        output = str(output)
+
+                    reply_text = str(output).strip()
+                    if not reply_text:
+                        logger.warning("Hermes run %s completed but output is empty", run_id)
+                        return None
+
+                    verdict_dict = _extract_json_from_reply(reply_text)
+                    if verdict_dict:
+                        logger.info("Hermes run %s verdict: %s", run_id, verdict_dict.get("verdict"))
+                        return verdict_dict
+
+                    logger.warning(
+                        "Hermes run %s: failed to parse verdict from: %s", run_id, reply_text[:200]
+                    )
+                    return None
+
+                if status in ("failed", "cancelled", "error"):
+                    logger.warning("Hermes run %s ended with status: %s", run_id, status)
+                    return None
+
+            logger.warning("Hermes run %s timed out after %.0fs", run_id, timeout)
             return None
 
     except httpx.TimeoutException:
-        logger.warning("Hermes brain timed out after %ss", timeout)
+        logger.warning("Hermes api_server request timed out")
         return None
     except Exception as e:
-        logger.warning("Hermes brain request failed: %s", e)
+        logger.warning("Hermes api_server call failed: %s", e)
         return None
