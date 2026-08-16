@@ -202,28 +202,45 @@ def _clamp_confidence(value) -> float:
 def _build_search_query(caption: str, claim: str) -> str:
     """Build a concise search query from caption and claim for SearXNG.
 
-    Strips hashtags, @mentions, and URLs from caption, then combines key
-    caption words with the claim text, truncated to 120 chars.
+    Priority: caption (contains the actual substance) over claim (often just
+    'Is this true?' from the user). Falls back to claim when caption is empty.
+    Strips URLs, hashtags, @mentions before extracting keywords.
     """
     import re
-    # Strip URLs, hashtags, @mentions from caption
-    clean_caption = re.sub(r"https?://\S+", "", caption)
-    clean_caption = re.sub(r"#\S+", "", clean_caption)
-    clean_caption = re.sub(r"@\S+", "", clean_caption)
-    clean_caption = " ".join(clean_caption.split())
 
-    # Strip "Is this true:"-style prefixes from claim
-    claim_words = claim.strip()
-    for prefix in ("Is this true:", "Apakah benar:", "Benarkah", "Fact check:"):
-        if claim_words.lower().startswith(prefix.lower()):
-            claim_words = claim_words[len(prefix):].strip()
+    def _clean(text: str) -> str:
+        t = re.sub(r"https?://\S+", "", text)
+        t = re.sub(r"#\S+", "", t)
+        t = re.sub(r"@\S+", "", t)
+        return " ".join(t.split()).strip()
+
+    clean_caption = _clean(caption or "")
+    clean_claim = _clean(claim or "")
+
+    # Strip generic question prefixes from claim — they add no search value
+    _generic_prefixes = (
+        "is this true", "is this information true", "is this news true",
+        "is this information are true", "is this news are true",
+        "apakah benar", "apakah ini benar", "benarkah", "fact check:",
+        "ces informations sont", "ist das wahr",
+    )
+    claim_lower = clean_claim.lower()
+    for prefix in _generic_prefixes:
+        if claim_lower.startswith(prefix):
+            clean_claim = clean_claim[len(prefix):].strip(" ?:.,")
             break
 
-    # Combine: claim first, then caption context
-    combined = claim_words
+    # Caption is primary signal — take first 100 chars of cleaned caption
+    # Append remaining claim keywords only if they add substance
     if clean_caption:
-        combined = f"{claim_words} {clean_caption}"
-    return combined[:120].strip()
+        query = clean_caption[:100]
+        # Append claim remainder only if it's not empty and not already covered
+        if clean_claim and clean_claim.lower() not in query.lower():
+            query = f"{query} {clean_claim}"
+    else:
+        query = clean_claim
+
+    return query[:150].strip()
 
 
 async def searxng_search(query: str, max_results: int = 5) -> list[dict]:
