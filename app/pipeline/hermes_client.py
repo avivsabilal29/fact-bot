@@ -164,9 +164,8 @@ async def call_hermes(caption: str, claim: str, timeout: float = 120.0) -> Optio
         logger.warning("HERMES_WEBHOOK_SECRET not set -- cannot authenticate with Hermes api_server")
         return None
 
-    # api_server runs on port 8642, separate from webhook port 8644
-    # Replace webhook port with api_server port
-    api_url = base_url.replace(":8644", ":8642")
+    # api_server runs on port 8642, use /p/factbot/ prefix to load factbot profile (SOUL.md + MCP)
+    api_url = base_url.replace(":8644", ":8642") + "/p/factbot"
 
     prompt = _format_hermes_prompt(caption, claim)
 
