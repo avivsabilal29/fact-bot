@@ -57,8 +57,12 @@ class Settings(BaseSettings):
     progress_min_interval_seconds: float = 20.0
     progress_slow_after_seconds: float = 30.0
 
+    # ---- SearXNG web search ----
+    searxng_url: str = Field(default="http://searxng:8080", alias="SEARXNG_URL")
+
     # ---- Hermes brain (service hermes-brain di docker-compose) ----
-    hermes_webhook_secret: str = ""
+    hermes_webhook_url: str = Field(default="", alias="HERMES_WEBHOOK_URL")
+    hermes_webhook_secret: str = Field(default="", alias="HERMES_WEBHOOK_SECRET")
 
     class Config:
         env_file = ".env"

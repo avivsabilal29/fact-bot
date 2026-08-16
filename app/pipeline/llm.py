@@ -256,7 +256,7 @@ async def searxng_search(query: str, max_results: int = 5) -> list[dict]:
     params = {
         "q": query,
         "format": "json",
-        "language": "id-ID",
+        "language": "auto",
         "categories": "general,news",
         "engines": "google,bing,duckduckgo",
     }
@@ -283,11 +283,23 @@ async def searxng_search(query: str, max_results: int = 5) -> list[dict]:
 async def analyze_claim(caption: str, claim: str) -> dict:
     """Analisa klaim terhadap caption/title dan kembalikan dict verdict tervalidasi.
 
-    Selalu mengembalikan dict dengan 'verdict' ∈ VALID_VERDICTS. Output LLM yang
-    invalid/tidak terparse memicu 1x retry dengan feedback skema; bila masih
-    invalid, fallback ke verdict='unverified' + notes penjelas.
-    Melempar LLMConfigError bila proxy tidak dikonfigurasi (permanent error).
+    Primary: Hermes brain via webhook (has MCP SearXNG tool calling + SOUL.md rules).
+    Fallback: DeepSeek direct API (with local SearXNG search injection).
     """
+    # ── Primary: Hermes brain via webhook ──────────────────────────────────
+    if settings.hermes_webhook_url and settings.hermes_webhook_url.strip():
+        logger.info("Using Hermes brain as primary LLM engine")
+        try:
+            from app.pipeline.hermes_client import call_hermes
+            hermes_res = await call_hermes(caption, claim, timeout=settings.llm_timeout_seconds)
+            if hermes_res is not None:
+                logger.info(f"Hermes brain verdict: {hermes_res.get('verdict')}")
+                return hermes_res
+            logger.warning("Hermes brain returned None — falling back to DeepSeek direct")
+        except Exception as exc:
+            logger.warning(f"Hermes brain call failed ({exc}) — falling back to DeepSeek direct")
+
+    # ── Fallback: DeepSeek direct ──────────────────────────────────────────
     # Fetch web search results for grounding (graceful fallback if unavailable)
     search_query = _build_search_query(caption, claim)
     web_results = await searxng_search(search_query)
