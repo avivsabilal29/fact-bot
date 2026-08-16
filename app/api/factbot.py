@@ -63,10 +63,13 @@ async def create_report(
     if not title:
         title = f"Analisa: {claim[:60]}"
 
+    # Truncate name to API limit (100 chars)
+    name_truncated = name[:97] + "..." if len(name) > 100 else name
+
     body = {
         "id": report_id,
         "title": title,
-        "name": name,
+        "name": name_truncated,
         "platform": platform,
         "verdict": verdict.get("verdict"),
         "category": verdict.get("category") or "other",
